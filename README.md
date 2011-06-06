@@ -4,7 +4,7 @@ Basic Evented Web Server
 This is a project I've wanted to do for quite a long time now. It's a web
 server built around the single-thread event loop design. The C10k problem was
 solved a long time ago (see: [nginx][1], [lighttpd][2], [Cherokee][3], etc.),
-so I am not blazing new trail with here but that isn't the point anyway. I am
+so I am not blazing new trail here but that isn't the point anyway. I am
 a server geek and this stuff is interesting to me, so implementing it myself is
 a fun project that I will learn a lot from.
 
@@ -16,12 +16,12 @@ esoteric features of C++, just enough to be easier than straight C.
 
 Since I work on a Mac mainly, the initial implementation of the event loop is
 based on [Kqueue][4]. I hope to add a suitable Linux event interface as well,
-probably [Epoll][5] but that will come later. I decided not to use a premade
+probably [Epoll][5], but that will come later. I decided not to use a premade
 event loop library like [libev][6] because that is one of the most interesting
 parts of this project for me.
 
 For HTTP parsing, I am using Ryan Dahl's [http-parser][7] library since it is small,
-easy to use, and parsing HTTP isn't all that interesting.
+easy to use, and parsing HTTP is boring.
 
 Roadmap
 -------

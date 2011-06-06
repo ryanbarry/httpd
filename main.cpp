@@ -3,6 +3,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/event.h>
+#include <sys/uio.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -12,62 +13,63 @@
 #include <cstring>
 #include <cstdio>
 #include <map>
+#include <string>
 #include <utility>
 
 #define QLEN 32
 #define BUFSIZE 4096
-#define PORT_BASE 8000
+#define PORT_BASE 0
 
 struct conn_state
 {
 	char *addr;
 	http_parser *parser;
-};
+};	
+	
+/* used to store state for each connection,
+   such as an http parser instance */
+std::map<int, struct conn_state *> *connections = new std::map<int, struct conn_state *>();
+
+/* request info */
+unsigned int uri_len = 128;
+char *uri_start;
+char *uri = (char *)malloc(uri_len);
+
+unsigned int query_len = 128;
+char *query = (char *)malloc(query_len);
 
 /* socket library error indicator */
 extern int errno;
 
 /* forwards for some support functions */
 int errexit(const char *format, ...);
-int passivesock(const char *service, const char *transport, int qlen);
+unsigned int passivesock(const char *service, const char *transport, int qlen);
+void close_connection(int fd);
 
 /* http parser callbacks */
 int url_callback(http_parser *p, const char *at, size_t length);
+int query_str_callback(http_parser *p, const char *at, size_t length);
+int msg_complete_callback(http_parser *p);
 
 int main(int argc, char *argv[])
 {
-	char *service = "http";
 	char buf[BUFSIZE];
 	struct sockaddr_in client;
-	int servsock, nevents, nparsed, kq, i;
-	unsigned int len;
+	int nevents, nparsed, kq, i;
+	unsigned int len, servsock;
 	struct conn_state *c;
 	
 	struct kevent ke;
 	
-	/* used to store state for each connection,
-	   such as an http parser instance */
-	std::map<int, struct conn_state *> *connections = new std::map<int, struct conn_state *>();
-	
 	http_parser_settings parser_settings;
-	
-	switch(argc) {
-		case 1:
-		break;
-		
-		case 2:
-			service = argv[1];
-		break;
-		
-		default:
-			errexit("usage: httpd [port]\n");
-	}
 	
 	/* set up http parser callbacks */
 	parser_settings.on_url = url_callback;
+	parser_settings.on_query_string = query_str_callback;
+	parser_settings.on_message_complete = msg_complete_callback;
 	
 	/* listen socket */
-	servsock = passivesock(service, "tcp", QLEN);
+	servsock = passivesock("http", "tcp", QLEN);
 	
 	/* create a new kernel event queue */
 	kq = kqueue();
@@ -142,17 +144,14 @@ int main(int argc, char *argv[])
 				if(kevent(kq, &ke, 1, 0, 0, NULL) == -1)
 					errexit("kevent() failed on removing a client\n");
 				
-				close((size_t)c->parser->data);
-				delete c;
-				connections->erase(ke.ident);
+				close_connection(ke.ident);
 			}
 			else
 			{
-				printf("received following request from client %s:\n%s", c->addr, buf);
 				nparsed = http_parser_execute(c->parser, &parser_settings, buf, i);
 				if(nparsed != i)
 				{
-					printf("error parsing request from client %s; (should close connection)\n", c->addr);	
+					printf("error parsing request from client %s\n", c->addr);	
 				}
 			}
 		}
@@ -161,7 +160,7 @@ int main(int argc, char *argv[])
 	return 0;
 }
 
-int passivesock(const char *service, const char *transport, int qlen)
+unsigned int passivesock(const char *service, const char *transport, int qlen)
 {
 	struct servent *pse;
 	struct protoent *ppe;
@@ -194,7 +193,7 @@ int passivesock(const char *service, const char *transport, int qlen)
 	if(type == SOCK_STREAM && listen(s, qlen) < 0)
 		errexit("can't listen on %s port: %s\n", service, strerror(errno));
 	
-	return s;
+	return (unsigned int)s;
 }
 
 int errexit(const char *format, ...)
@@ -207,7 +206,97 @@ int errexit(const char *format, ...)
 	exit(1);
 }
 
+void close_connection(int fd)
+{
+	close(fd);
+	conn_state *c = (*connections)[fd];
+	delete c;
+	connections->erase(fd);
+}
+
 int url_callback(http_parser *p, const char *at, size_t length)
 {
-	printf("url_callback() - len: %d; at: %s\n", (uint)length, at);
+	uri_start = (char *)at;
+	if(length-1 >= uri_len)
+	{
+		uri = (char *)realloc(uri, length);
+		
+		/* if realloc() returns NULL, there is no memory left... */
+		if(uri == NULL)
+			errexit("Ran out of memory (in url_callback)!\n");
+		
+		uri_len = length;
+	}
+	
+	memcpy(uri, at+1, length-1);
+	uri[length] = '\0';
+	
+	return 0;
+}
+
+int query_str_callback(http_parser *p, const char *at, size_t length)
+{
+	/* cut off the URI just before the query string */
+	uri[at-uri_start-1] = '\0';
+	
+	if(length > 0)
+	{
+		if(length-1 >= query_len)
+		{
+			query = (char *)realloc(query, length);
+		
+			if(query == NULL)
+				errexit("Ran out of memory (in query_str_callback)!\n");
+		
+			query_len = length;
+		}
+
+		memcpy(query, at+1, length-1);
+	}
+	
+	query[length] = '\0';
+	
+	return 0;
+}
+
+int msg_complete_callback(http_parser *p)
+{
+	char *crlf = "\r\n";
+	std::string status("HTTP/");
+	char ver[5];
+	sprintf(ver, "%1hi.%1hi ", p->http_major, p->http_minor);
+	status += ver;
+	
+	struct iovec vectors[4];
+	vectors[3].iov_base = crlf;
+	vectors[3].iov_len = 2;
+	
+	/* send response */
+	switch(p->method)
+	{
+		case HTTP_GET:
+		case HTTP_HEAD:
+		status += "200 OK\r\n";
+		break;
+		default:
+		status += "501 Not Implemented\r\n";
+	}
+	
+	/* status string iovector */
+	vectors[0].iov_base = (void *)status.c_str();
+	vectors[0].iov_len = status.length();
+	
+	/* response headers */
+	vectors[1].iov_base = (void *)"Content-Type: text/html\r\nContent-Length: 14\r\n\r\n";
+	vectors[1].iov_len = 47;
+
+	/* not doing response body right now */
+	vectors[2].iov_base = (void *)"Hello world!\r\n";
+	vectors[2].iov_len = 14;
+	
+	writev((size_t)p->data, vectors, 3);
+	
+	close_connection((size_t)p->data);
+	
+	return 0;
 }
