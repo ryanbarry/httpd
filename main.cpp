@@ -22,7 +22,9 @@
 
 struct conn_state
 {
+	int sockfd;
 	char *addr;
+	bool keepalive;
 	http_parser *parser;
 };	
 	
@@ -38,8 +40,15 @@ char *uri = (char *)malloc(uri_len);
 unsigned int query_len = 128;
 char *query = (char *)malloc(query_len);
 
+unsigned int header_field_len = 128;
+char *header_field = (char *)malloc(header_field_len);
+
 /* socket library error indicator */
 extern int errno;
+
+/* global kqueue */
+int kq;
+struct kevent ke;
 
 /* forwards for some support functions */
 int errexit(const char *format, ...);
@@ -50,16 +59,17 @@ void close_connection(int fd);
 int url_callback(http_parser *p, const char *at, size_t length);
 int query_str_callback(http_parser *p, const char *at, size_t length);
 int msg_complete_callback(http_parser *p);
+int header_field_callback(http_parser *p, const char *at, size_t length);
+int header_value_callback(http_parser *p, const char *at, size_t length);
 
 int main(int argc, char *argv[])
 {
 	char buf[BUFSIZE];
 	struct sockaddr_in client;
-	int nevents, nparsed, kq, i;
-	unsigned int len, servsock;
+	int nevents, i;
+	unsigned int len, servsock, nbytes;
 	struct conn_state *c;
 	
-	struct kevent ke;
 	
 	http_parser_settings parser_settings;
 	
@@ -67,6 +77,8 @@ int main(int argc, char *argv[])
 	parser_settings.on_url = url_callback;
 	parser_settings.on_query_string = query_str_callback;
 	parser_settings.on_message_complete = msg_complete_callback;
+	parser_settings.on_header_field = header_field_callback;
+	parser_settings.on_header_value = header_value_callback;
 	
 	/* listen socket */
 	servsock = passivesock("http", "tcp", QLEN);
@@ -86,75 +98,74 @@ int main(int argc, char *argv[])
 		errexit("kevent() failed on initial setup\n");
 	
 	while(1)
+	/* event loop */
 	{
-		memset(&ke, 0, sizeof(ke));
-		
 		/* receive an event, a blocking call as timeout is NULL */
 		nevents = kevent(kq, NULL, 0, &ke, 1, NULL);
-		if(nevents == -1)
-			errexit("kevent() failed in event loop\n");
-		else if(nevents == 0)
-			continue;
-		else if(ke.ident == servsock)
+		if(nevents > 0)
 		{
+			if(ke.ident == servsock)
 			/* server socket event, meaning a client is connecting */
-			len = (socklen_t)sizeof(client);
-			i = accept(servsock, (struct sockaddr *)&client, &len);
-			if(i == -1)
-				errexit("accept() failed: %s\n", strerror(errno));
-			else
 			{
-				c = new struct conn_state;
-				c->addr = strdup(inet_ntoa(client.sin_addr));
-				if(c->addr == NULL)
-					errexit("strdup() failed\n");
-				c->parser = new http_parser;
-				http_parser_init(c->parser, HTTP_REQUEST);
-				c->parser->data = (void*)i;
-				
-				connections->insert(std::pair<int,struct conn_state *>(i, c));
-				
-				EV_SET(&ke, i, EVFILT_READ, EV_ADD, 0, 0, NULL);
-				if(kevent(kq, &ke, 1, NULL, 0, NULL) == -1)
-					errexit("kevent() failed when adding new client\n");
-				
-				printf("Connection from %s received\n", c->addr);
-			}
-		}
-		else
-		{
-			/* a client has sent some data */
-			memset(buf, 0, sizeof(buf));
-			
-			/* get conn_state object for client corresponding to event */
-			c = (*connections)[(int)ke.ident];
-			
-			/* read from the client's socket */
-			i = read((size_t)c->parser->data, buf, sizeof(buf));
-			
-			if(i == -1)
-				continue;
-			else if(i == 0)
-			{
-				/* EOF from client */
-				printf("removing %s\n", c->addr);
-				
-				EV_SET(&ke, (uintptr_t)c->parser->data, EVFILT_READ, EV_DELETE, 0, 0, NULL);
-				
-				if(kevent(kq, &ke, 1, 0, 0, NULL) == -1)
-					errexit("kevent() failed on removing a client\n");
-				
-				close_connection(ke.ident);
-			}
-			else
-			{
-				nparsed = http_parser_execute(c->parser, &parser_settings, buf, i);
-				if(nparsed != i)
+				len = (socklen_t)sizeof(client);
+				i = accept(servsock, (struct sockaddr *)&client, &len);
+
+				if(i == -1)
+					errexit("accept() failed: %s\n", strerror(errno));
+				else
 				{
-					printf("error parsing request from client %s\n", c->addr);	
+					c = new struct conn_state;
+					c->sockfd = i;
+					c->keepalive = false;
+					c->addr = strdup(inet_ntoa(client.sin_addr));
+					if(c->addr == NULL)
+						errexit("strdup() failed\n");
+					c->parser = new http_parser;
+					http_parser_init(c->parser, HTTP_REQUEST);
+					c->parser->data = (void*)i;
+
+					connections->insert(std::pair<int,struct conn_state *>(i, c));
+
+					EV_SET(&ke, i, EVFILT_READ, EV_ADD, 0, 0, NULL);
+					if(kevent(kq, &ke, 1, NULL, 0, NULL) == -1)
+						errexit("kevent() failed when adding new client\n");
 				}
 			}
-		}
+			else
+			/* a client has sent some data */
+			{
+				memset(buf, 0, sizeof(buf));
+				
+				/* get conn_state object for client corresponding to event */
+				c = (*connections)[(int)ke.ident];
+				
+				/* read from the client's socket */
+				nbytes = read((size_t)c->sockfd, buf, sizeof(buf));
+				
+				if(nbytes > 0)
+				{
+					if(http_parser_execute(c->parser, &parser_settings, buf, nbytes) != nbytes)
+					{
+						printf("error parsing request from client %s (on byte %d/%d)\n", c->addr, i, nbytes);
+						close_connection(ke.ident);
+					}
+				}
+				else if(nbytes == 0)
+				{
+					/* EOF from client */
+					close_connection(ke.ident);
+				}
+				else
+				{
+					printf("Read error: %s\n", strerror(errno));
+					close_connection(ke.ident);
+				}
+			}
+		}	
+		else if(nevents == 0)
+			continue;
+		else /* nevents == -1 */
+			errexit("kevent() failed in event loop\n");
 	}
 	
 	return 0;
@@ -208,6 +219,12 @@ int errexit(const char *format, ...)
 
 void close_connection(int fd)
 {
+/*	events are automatically deleted on "the last close of the descriptor"
+	EV_SET(&ke, fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+	
+	if(kevent(kq, &ke, 1, 0, 0, NULL) == -1)
+		errexit("kevent() failed on removing a client\n");
+*/	
 	close(fd);
 	conn_state *c = (*connections)[fd];
 	delete c;
@@ -229,29 +246,26 @@ int url_callback(http_parser *p, const char *at, size_t length)
 	}
 	
 	memcpy(uri, at+1, length-1);
-	uri[length] = '\0';
+	uri[length-1] = '\0';
 	
 	return 0;
 }
 
 int query_str_callback(http_parser *p, const char *at, size_t length)
 {
-	/* cut off the URI just before the query string */
-	uri[at-uri_start-1] = '\0';
-	
 	if(length > 0)
 	{
-		if(length-1 >= query_len)
+		if(length >= query_len)
 		{
-			query = (char *)realloc(query, length);
+			query = (char *)realloc(query, length+1);
 		
 			if(query == NULL)
 				errexit("Ran out of memory (in query_str_callback)!\n");
 		
-			query_len = length;
+			query_len = length+1;
 		}
 
-		memcpy(query, at+1, length-1);
+		memcpy(query, at, length);
 	}
 	
 	query[length] = '\0';
@@ -261,15 +275,12 @@ int query_str_callback(http_parser *p, const char *at, size_t length)
 
 int msg_complete_callback(http_parser *p)
 {
-	char *crlf = "\r\n";
 	std::string status("HTTP/");
 	char ver[5];
 	sprintf(ver, "%1hi.%1hi ", p->http_major, p->http_minor);
 	status += ver;
 	
-	struct iovec vectors[4];
-	vectors[3].iov_base = crlf;
-	vectors[3].iov_len = 2;
+	struct iovec vectors[3];
 	
 	/* send response */
 	switch(p->method)
@@ -287,8 +298,8 @@ int msg_complete_callback(http_parser *p)
 	vectors[0].iov_len = status.length();
 	
 	/* response headers */
-	vectors[1].iov_base = (void *)"Content-Type: text/html\r\nContent-Length: 14\r\n\r\n";
-	vectors[1].iov_len = 47;
+	vectors[1].iov_base = (void *)"Content-Type: text/plain\r\nContent-Length: 14\r\nConnection: keep-alive\r\n\r\n";
+	vectors[1].iov_len = 72;
 
 	/* not doing response body right now */
 	vectors[2].iov_base = (void *)"Hello world!\r\n";
@@ -296,7 +307,46 @@ int msg_complete_callback(http_parser *p)
 	
 	writev((size_t)p->data, vectors, 3);
 	
-	close_connection((size_t)p->data);
+	if(!(*connections)[(size_t)p->data]->keepalive)
+		close_connection((size_t)p->data);
+	
+	return 0;
+}
+
+int header_field_callback(http_parser *p, const char *at, size_t length)
+{
+	if(length >= header_field_len)
+	{
+		header_field = (char *)realloc(header_field, length+1);
+		
+		if(header_field == NULL)
+			errexit("Ran out of memory (in header_field_callback)!\n");
+		
+		header_field_len = length+1;
+	}
+	
+	memcpy(header_field, at, length);
+	
+	return 0;
+}
+
+int header_value_callback(http_parser *p, const char *at, size_t length)
+{
+	switch(header_field[0])
+	{
+		case 'C':
+			if(strlen(header_field) == 10)
+			/* Connection */
+			{
+				if(strncmp("Keep-Alive", at, length) == 0)
+					(*connections)[(size_t)p->data]->keepalive = true;
+				else
+					(*connections)[(size_t)p->data]->keepalive = false;
+			}
+			break;
+		default:
+			break;
+	}
 	
 	return 0;
 }

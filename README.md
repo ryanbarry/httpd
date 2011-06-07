@@ -10,7 +10,7 @@ a fun project that I will learn a lot from.
 
 Implementation
 --------------
-I like C/C++ and plan on using mostly C but with basic C++ features where that
+I like C/C++ and plan on using mostly C but with basic C++ features where they
 makes sense. I don't want to go crazy with objects or templates or any of the
 esoteric features of C++, just enough to be easier than straight C.
 
@@ -28,9 +28,20 @@ Roadmap
 Features yet to be implemented, listed in order of importance (to me):
 
  * static file serving
+
+   This includes all the basic web server machinery - connection handling, header processing, response generation, etc.
+ 
  * directory indexes
+
+   This might seem like an obvious feature, but I think it will prove to be more complex than it seems, traversing directories and generating an HTML page representing their structure is a bit of work; I am also thinking that this may fit into a module once that API is in place, we'll see...
+
  * Epoll
+
+   I am not interested in supporting every platform out there (Windows, older Linux, other *nix's are all well served by other software) so I think between Kqueue (FreeBSD & OS X) and Epoll (Linux 2.6+) I will be satisfied with multiplatform support. If others would like to contribute support for other systems, it may be easier once I have two implementations in place and I would be happy to accept contributions.
+
  * module API (for things like mod_fcgi etc.)
+
+   Having never written a plugin API before, this part will definitely be tricky. I'm not sure if I'll want to (or be able to...) support loadable modules or if I'll stick to the model that requires modules to be compiled in a la nginx. This will require lots of research and will most definitely be modeled after other servers' module systems.
 
 This list is very short, and there will likely be things that pop up in between
 implementing the things on the list so it's just a vague outline.
