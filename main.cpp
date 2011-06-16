@@ -1,6 +1,7 @@
 #include "http-parser/http_parser.h"
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/event.h>
 #include <sys/uio.h>
@@ -12,6 +13,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <ctime>
+#include <fstream>
 #include <map>
 #include <string>
 #include <utility>
@@ -24,24 +27,19 @@ struct conn_state
 {
 	int sockfd;
 	char *addr;
-	bool keepalive;
 	http_parser *parser;
+	std::map<std::string, std::string> req_headers;
 };	
 	
 /* used to store state for each connection,
    such as an http parser instance */
-std::map<int, struct conn_state *> *connections = new std::map<int, struct conn_state *>();
+std::map<int, conn_state *> *connections = new std::map<int, conn_state *>();
 
 /* request info */
-unsigned int uri_len = 128;
-char *uri_start;
-char *uri = (char *)malloc(uri_len);
-
-unsigned int query_len = 128;
-char *query = (char *)malloc(query_len);
-
-unsigned int header_field_len = 128;
-char *header_field = (char *)malloc(header_field_len);
+std::string path;
+std::string query;
+std::string url;
+std::string header_field;
 
 /* socket library error indicator */
 extern int errno;
@@ -54,13 +52,21 @@ struct kevent ke;
 int errexit(const char *format, ...);
 unsigned int passivesock(const char *service, const char *transport, int qlen);
 void close_connection(int fd);
+void append_date_header(std::string *response_head);
 
 /* http parser callbacks */
-int url_callback(http_parser *p, const char *at, size_t length);
+int msg_begin_callback(http_parser *p);
+int path_callback(http_parser *p, const char *at, size_t length);
 int query_str_callback(http_parser *p, const char *at, size_t length);
-int msg_complete_callback(http_parser *p);
+int url_callback(http_parser *p, const char *at, size_t length);
 int header_field_callback(http_parser *p, const char *at, size_t length);
 int header_value_callback(http_parser *p, const char *at, size_t length);
+int msg_complete_callback(http_parser *p);
+
+/* http response methods */
+bool http_respond_get(conn_state *cs);
+bool http_respond_head(conn_state *cs);
+bool http_respond_default(conn_state *cs);
 
 int main(int argc, char *argv[])
 {
@@ -68,17 +74,19 @@ int main(int argc, char *argv[])
 	struct sockaddr_in client;
 	int nevents, i;
 	unsigned int len, servsock, nbytes;
-	struct conn_state *c;
+	conn_state *c;
 	
 	
 	http_parser_settings parser_settings;
 	
 	/* set up http parser callbacks */
-	parser_settings.on_url = url_callback;
+	parser_settings.on_message_begin = msg_begin_callback;
+	parser_settings.on_path = path_callback;
 	parser_settings.on_query_string = query_str_callback;
-	parser_settings.on_message_complete = msg_complete_callback;
+	parser_settings.on_url = url_callback;
 	parser_settings.on_header_field = header_field_callback;
 	parser_settings.on_header_value = header_value_callback;
+	parser_settings.on_message_complete = msg_complete_callback;
 	
 	/* listen socket */
 	servsock = passivesock("http", "tcp", QLEN);
@@ -90,8 +98,14 @@ int main(int argc, char *argv[])
 	
 	/* initialize kevent structure */
 	memset(&ke, 0, sizeof(struct kevent));
-/* TODO: verbose description of line below */
-	EV_SET(&ke, servsock, EVFILT_READ, EV_ADD, 0, 5, NULL);
+	/* ke is the kevent struct
+	   servsock is the file descriptor of the socket
+	   EVFILT_READ is the filter type
+	   EV_ADD means we're adding this event to the queue
+	   0 means there are no filter-specific flags
+	   0 means there is no data to go with this filter
+	   NULL means there is no timeout, this call will block */
+	EV_SET(&ke, servsock, EVFILT_READ, EV_ADD, 0, 0, NULL);
 	
 	/* set the event */
 	if(kevent(kq, &ke, 1, NULL, 0, NULL) == -1)
@@ -114,17 +128,16 @@ int main(int argc, char *argv[])
 					errexit("accept() failed: %s\n", strerror(errno));
 				else
 				{
-					c = new struct conn_state;
+					c = new conn_state;
 					c->sockfd = i;
-					c->keepalive = false;
 					c->addr = strdup(inet_ntoa(client.sin_addr));
 					if(c->addr == NULL)
 						errexit("strdup() failed\n");
 					c->parser = new http_parser;
 					http_parser_init(c->parser, HTTP_REQUEST);
 					c->parser->data = (void*)i;
-
-					connections->insert(std::pair<int,struct conn_state *>(i, c));
+					
+					connections->insert(std::pair<int, conn_state *>(i, c));
 
 					EV_SET(&ke, i, EVFILT_READ, EV_ADD, 0, 0, NULL);
 					if(kevent(kq, &ke, 1, NULL, 0, NULL) == -1)
@@ -134,13 +147,13 @@ int main(int argc, char *argv[])
 			else
 			/* a client has sent some data */
 			{
-				memset(buf, 0, sizeof(buf));
+				//memset(buf, 0, sizeof(buf));
 				
 				/* get conn_state object for client corresponding to event */
 				c = (*connections)[(int)ke.ident];
 				
 				/* read from the client's socket */
-				nbytes = read((size_t)c->sockfd, buf, sizeof(buf));
+				nbytes = read(c->sockfd, buf, sizeof(buf));
 				
 				if(nbytes > 0)
 				{
@@ -224,129 +237,254 @@ void close_connection(int fd)
 	
 	if(kevent(kq, &ke, 1, 0, 0, NULL) == -1)
 		errexit("kevent() failed on removing a client\n");
-*/	
+*/
 	close(fd);
 	conn_state *c = (*connections)[fd];
 	delete c;
 	connections->erase(fd);
 }
 
-int url_callback(http_parser *p, const char *at, size_t length)
+void append_date_header(std::string *response_head)
 {
-	uri_start = (char *)at;
-	if(length-1 >= uri_len)
-	{
-		uri = (char *)realloc(uri, length);
-		
-		/* if realloc() returns NULL, there is no memory left... */
-		if(uri == NULL)
-			errexit("Ran out of memory (in url_callback)!\n");
-		
-		uri_len = length;
-	}
+	tm *ptm;
+	time_t now = time(NULL);
+	ptm = gmtime(&now);
+	char tmp[32];
 	
-	memcpy(uri, at+1, length-1);
-	uri[length-1] = '\0';
+	/* date string example: Sun, 06 Nov 1994 08:49:37 GMT */
+	strftime(tmp, 31, "%a, %d %b %Y %H:%M:%S GMT\r\n", ptm);
+	
+	response_head->append(tmp);
+}
+
+int msg_begin_callback(http_parser *p)
+{
+	conn_state *cs = (*connections)[(size_t)p->data];
+		
+	/* clear all the headers stored for this connection (if this isn't a new connection) */
+	if(!cs->req_headers.empty())
+		cs->req_headers.clear();
+	
+	return 0;
+}
+
+int path_callback(http_parser *p, const char *at, size_t length)
+{
+	path.assign(at, length);
 	
 	return 0;
 }
 
 int query_str_callback(http_parser *p, const char *at, size_t length)
 {
-	if(length > 0)
-	{
-		if(length >= query_len)
-		{
-			query = (char *)realloc(query, length+1);
-		
-			if(query == NULL)
-				errexit("Ran out of memory (in query_str_callback)!\n");
-		
-			query_len = length+1;
-		}
-
-		memcpy(query, at, length);
-	}
-	
-	query[length] = '\0';
+	query.assign(at, length);
 	
 	return 0;
 }
 
-int msg_complete_callback(http_parser *p)
+int url_callback(http_parser *p, const char *at, size_t length)
 {
-	std::string status("HTTP/");
-	char ver[5];
-	sprintf(ver, "%1hi.%1hi ", p->http_major, p->http_minor);
-	status += ver;
-	
-	struct iovec vectors[3];
-	
-	/* send response */
-	switch(p->method)
-	{
-		case HTTP_GET:
-		case HTTP_HEAD:
-		status += "200 OK\r\n";
-		break;
-		default:
-		status += "501 Not Implemented\r\n";
-	}
-	
-	/* status string iovector */
-	vectors[0].iov_base = (void *)status.c_str();
-	vectors[0].iov_len = status.length();
-	
-	/* response headers */
-	vectors[1].iov_base = (void *)"Content-Type: text/plain\r\nContent-Length: 14\r\nConnection: keep-alive\r\n\r\n";
-	vectors[1].iov_len = 72;
-
-	/* not doing response body right now */
-	vectors[2].iov_base = (void *)"Hello world!\r\n";
-	vectors[2].iov_len = 14;
-	
-	writev((size_t)p->data, vectors, 3);
-	
-	if(!(*connections)[(size_t)p->data]->keepalive)
-		close_connection((size_t)p->data);
+	url.assign(at, length);
 	
 	return 0;
 }
 
 int header_field_callback(http_parser *p, const char *at, size_t length)
 {
-	if(length >= header_field_len)
-	{
-		header_field = (char *)realloc(header_field, length+1);
-		
-		if(header_field == NULL)
-			errexit("Ran out of memory (in header_field_callback)!\n");
-		
-		header_field_len = length+1;
-	}
-	
-	memcpy(header_field, at, length);
+	header_field.assign(at, length);
 	
 	return 0;
 }
 
 int header_value_callback(http_parser *p, const char *at, size_t length)
 {
-	switch(header_field[0])
-	{
-		case 'C':
-			if(strlen(header_field) == 10)
-			/* Connection */
-			{
-				if(strncmp("Keep-Alive", at, length) == 0)
-					(*connections)[(size_t)p->data]->keepalive = true;
-				else
-					(*connections)[(size_t)p->data]->keepalive = false;
-			}
-			break;
-		default:
-			break;
-	}
+	conn_state *cs = (*connections)[(size_t)p->data];
+	
+	std::string header_val(at, length);
+	
+	cs->req_headers[header_field] = header_val;
 	
 	return 0;
+}
+
+int msg_complete_callback(http_parser *p)
+{
+	bool keepalive;
+	conn_state *cs = (*connections)[(size_t)p->data];
+	
+	/* send response */
+	switch(p->method)
+	{
+		case HTTP_GET:
+		keepalive = http_respond_get(cs);
+		break;
+		case HTTP_HEAD:
+		keepalive = http_respond_head(cs);
+		break;
+		default:
+		keepalive = http_respond_default(cs);
+	}
+	
+	if(!keepalive)
+		close_connection((size_t)p->data);
+	
+	return 0;
+}
+
+bool http_respond_get(conn_state *cs)
+{
+	struct iovec vectors[2];
+	struct stat info;
+	char tmp[32];
+	bool keepalive;
+	std::string response_head;
+	
+	if(stat(path.c_str()+1, &info) != 0)
+	{
+		std::string response_body("<!DOCTYPE html>\n<html lang=en><head><title>Error 404 (Not Found)</title></head>"
+		"<body><h1>HTTP Client Error 404</h1><p>The resource requested could not be found.</p></body></html>\n");
+		
+		response_head.append("HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\n");
+		
+		append_date_header(&response_head);
+		
+		sprintf(tmp, "Content-Length: %d\r\n", (int)response_body.length());
+		response_head.append(tmp);
+		
+		if(cs->req_headers["Connection"] == "close")
+		{
+			keepalive = false;
+			response_head.append("Connection: close\r\n\r\n");
+		}
+		else
+		{
+			keepalive = true;
+			response_head.append("\r\n");
+		}		
+
+		vectors[0].iov_base = (void *)response_head.c_str();
+		vectors[0].iov_len = response_head.length();
+		
+		vectors[1].iov_base = (void *)response_body.c_str();
+		vectors[1].iov_len = response_body.length();
+		
+		writev(cs->sockfd, vectors, 2);
+	}
+	else
+	{
+		std::ifstream ifs;
+		ifs.open(path.c_str()+1, std::ios::binary);
+		char *filebuf = new char[info.st_size];
+		ifs.read(filebuf, info.st_size);
+		ifs.close();
+		
+		response_head.append("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n");
+		append_date_header(&response_head);
+		sprintf(tmp, "Content-Length: %d\r\n", (int)info.st_size);
+		response_head.append(tmp);
+		
+		if(cs->req_headers["Connection"] == "close")
+		{
+			keepalive = false;
+			response_head.append("Connection: close\r\n\r\n");
+		}
+		else
+		{
+			keepalive = true;
+			response_head.append("\r\n");
+		}
+		
+		vectors[0].iov_base = (void *)response_head.c_str();
+		vectors[0].iov_len = response_head.length();
+		
+		vectors[1].iov_base = filebuf;
+		vectors[1].iov_len = info.st_size;
+		
+		writev(cs->sockfd, vectors, 2);
+		
+		delete[] filebuf;
+	}
+	
+	return keepalive;
+}
+
+bool http_respond_head(conn_state *cs)
+{
+	struct iovec vector[1];
+	struct stat info;
+	char tmp[32];
+	bool keepalive;
+	std::string response_head;
+	
+	if(stat(path.c_str()+1, &info) != 0)
+	{
+		response_head.append("HTTP/1.1 404 Not Found\r\n");
+		
+		append_date_header(&response_head);
+		
+		if(cs->req_headers["Connection"] == "close")
+		{
+			keepalive = false;
+			response_head.append("Connection: close\r\n\r\n");
+		}
+		else
+		{
+			keepalive = true;
+			response_head.append("\r\n");
+		}		
+
+		vector[0].iov_base = (void *)response_head.c_str();
+		vector[0].iov_len = response_head.length();
+		
+		writev(cs->sockfd, vector, 1);
+	}
+	else
+	{
+		response_head.append("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n");
+		append_date_header(&response_head);
+		sprintf(tmp, "Content-Length: %d\r\n", (int)info.st_size);
+		response_head.append(tmp);
+		
+		if(cs->req_headers["Connection"] == "close")
+		{
+			keepalive = false;
+			response_head.append("Connection: close\r\n\r\n");
+		}
+		else
+		{
+			keepalive = true;
+			response_head.append("\r\n");
+		}
+		
+		vector[0].iov_base = (void *)response_head.c_str();
+		vector[0].iov_len = response_head.length();
+		
+		writev(cs->sockfd, vector, 1);
+	}
+	
+	return keepalive;
+}
+
+bool http_respond_default(conn_state *cs)
+{
+	struct iovec vectors[2];
+	char tmp[20];
+	std::string response_body("<!DOCTYPE html>\n<html lang=en><head><title>Error 501 (Not Implemented)</title></head>"
+	"<body><h1>HTTP Server Error 501</h1><p>The server encountered an error processing your request."
+	"The method your client specified is not implemented by this server.</p></body></html>");
+	std::string response_head("HTTP/1.1 501 Not Implemented\r\nContent-Type: text/html\r\n");
+	sprintf(tmp, "Content-Length: %d\r\n", (int)response_body.length());
+	response_head.append(tmp);
+	append_date_header(&response_head);
+	response_head.append("Connection: close\r\n");
+	
+	vectors[0].iov_base = (void *)response_head.c_str();
+	vectors[0].iov_len = response_head.length();
+	
+	vectors[1].iov_base = (void *)response_body.c_str();
+	vectors[1].iov_len = response_body.length();
+	
+	writev(cs->sockfd, vectors, 2);
+	
+	return false;
 }
