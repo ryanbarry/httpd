@@ -20,7 +20,7 @@ probably [Epoll][5], but that will come later. I decided not to use a premade
 event loop library like [libev][6] because that is one of the most interesting
 parts of this project for me.
 
-For HTTP parsing, I am using Ryan Dahl's [http-parser][7] library since it is small,
+For HTTP request parsing, I am using Ryan Dahl's [http-parser][7] library since it is small,
 easy to use, and parsing HTTP is boring.
 
 Roadmap
@@ -35,6 +35,14 @@ Features yet to be implemented, listed in order of importance (to me):
 
    This might seem like an obvious feature, but I think it will prove to be more complex than it seems, traversing directories and generating an HTML page representing their structure is a bit of work; I am also thinking that this may fit into a module once that API is in place, we'll see...
 
+ * virtual hosts
+
+   Being able to host multiple sites on one server is an essential and basic feature these days. Should be a pretty easy deal too, basically just need to correlate each Host with its own docroot.
+
+ * configuration file
+
+   At this point, there are enough features to warrant a method for configuring the server without requiring recompilation. I could have included this feature earlier, but I think it will be easier to implement once a base level of functionality is in place. Not sure what format configuration files will take at this point, might even use something like [Lua][8] if it's easy enough since that would add a great deal of power...
+
  * Epoll
 
    I am not interested in supporting every platform out there (Windows, older Linux, other *nix's are all well served by other software) so I think between Kqueue (FreeBSD & OS X) and Epoll (Linux 2.6+) I will be satisfied with multiplatform support. If others would like to contribute support for other systems, it may be easier once I have two implementations in place and I would be happy to accept contributions.
@@ -44,7 +52,7 @@ Features yet to be implemented, listed in order of importance (to me):
    Having never written a plugin API before, this part will definitely be tricky. I'm not sure if I'll want to (or be able to...) support loadable modules or if I'll stick to the model that requires modules to be compiled in a la nginx. This will require lots of research and will most definitely be modeled after other servers' module systems.
 
 This list is very short, and there will likely be things that pop up in between
-implementing the things on the list so it's just a vague outline.
+implementing the things on the list so it's just a vague outline for now.
 
 
 [1]: http://nginx.org/en/ "nginx (engine x) by Igor Sysoev"
