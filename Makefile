@@ -1,11 +1,15 @@
-CPPFLAGS=-Wall -Wextra -I http-parser
-OPT_DEBUG=$(CPPFLAGS) -O0 -g -DHTTP_PARSER_STRICT=1
-OPT_FAST=$(CPPFLAGS) -O3 -DHTTP_PARSER_STRICT=0
 TARGET=httpd
 CC=g++
 
-httpd: main.cpp http-parser/http_parser.c http-parser/http_parser.h
-	$(CC) $(CPPFLAGS) main.cpp http-parser/http_parser.c -o $@
+$(TARGET): http-parser/http_parser.o main.cpp
+	$(CC) -Wall -c main.cpp -o main.o
+	$(CC) -o $(TARGET) http-parser/http_parser.o main.o
+
+http-parser/http_parser.o:
+	$(MAKE) --directory=http-parser http_parser.o
 
 clean:
-	rm $(TARGET)
+	rm -f $(TARGET) main.o
+	$(MAKE) --directory=http-parser clean
+
+.PHONY: clean

@@ -1,2 +1,6 @@
+# ignore the target executable
 httpd
+# ignore the mac os x desktop services store
 .DS_Store
+# ignore objects and archives, anywhere in the tree
+*.[oa]

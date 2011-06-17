@@ -270,7 +270,56 @@ int msg_begin_callback(http_parser *p)
 
 int path_callback(http_parser *p, const char *at, size_t length)
 {
-	path.assign(at, length);
+	unsigned int i, ptr = 0;
+	char ascii, a, b;
+	
+	// empty previously set path string
+	path.clear();
+	for(i = 0; i < length; i++)
+	{
+		if(at[i] == '%')
+		{
+			// append the stuff up to this point
+			path.append(at+ptr, i-ptr);
+			
+			// convert hex digits to char
+			a = at[i+1], b = at[i+2];
+			if(a >=97)
+		    {
+				ascii = (a - 97) + 10;
+		    }
+		    else if(a >= 65)
+		    {
+				ascii = (a - 65) + 10;
+		    }
+		    else
+		    {
+				ascii = a - 48;
+		    }
+			ascii <<= 4;
+			if(b >=97)
+		    {
+				ascii += (b - 97) + 10;
+		    }
+		    else if(a >= 65)
+		    {
+				ascii += (b - 65) + 10;
+		    }
+		    else
+		    {
+				ascii += b - 48;
+		    }
+			
+			// append character to string
+			path.append(&ascii, 1);
+			
+			// skip ahead
+			i += 2;
+			ptr = i+1;
+		}
+	}
+	// append remaining stuff
+	path.append(at+ptr, i-ptr);
 	
 	return 0;
 }
