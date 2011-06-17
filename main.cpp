@@ -249,10 +249,10 @@ void append_date_header(std::string *response_head)
 	tm *ptm;
 	time_t now = time(NULL);
 	ptm = gmtime(&now);
-	char tmp[32];
+	char tmp[38];
 	
 	/* date string example: Sun, 06 Nov 1994 08:49:37 GMT */
-	strftime(tmp, 31, "%a, %d %b %Y %H:%M:%S GMT\r\n", ptm);
+	strftime(tmp, 37, "Date: %a, %d %b %Y %H:%M:%S GMT\r\n", ptm);
 	
 	response_head->append(tmp);
 }
