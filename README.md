@@ -57,7 +57,7 @@ implementing the things on the list so it's just a vague outline for now.
 
 [1]: http://nginx.org/en/ "nginx (engine x) by Igor Sysoev"
 [2]: http://www.lighttpd.net "lighttpd (lighty) 'fly light.'"
-[3]: http://www.cherokee-project.net "Cherokee Web Server"
+[3]: http://www.cherokee-project.com "Cherokee Web Server"
 [4]: http://en.wikipedia.org/wiki/Kqueue "Wikipedia article on Kqueue"
 [5]: http://en.wikipedia.org/wiki/Epoll "Wikipedia article on Epoll"
 [6]: http://software.schmorp.de/pkg/libev.html "Homepage of libev"
